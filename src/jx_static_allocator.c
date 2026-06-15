@@ -15,7 +15,7 @@
 
 #ifdef JX_USE_BAREMETAL
 
-#include "jx_static_allocator.h"
+#include "../private/jx_static_allocator.h"
 
 #ifdef JX_USE_HEAP_BAREMETAL
 #include <stdlib.h>
@@ -79,7 +79,7 @@ void *jx_static_malloc(size_t size)
  * @brief Free memory block.
  *
  * This is a no-op for static mode, but required to satisfy APIs
- * that expect a deallocation hook (e.g., cJSON).
+ * that expect a deallocation hook.
  *
  * @param ptr Pointer to memory block (may be NULL).
  */

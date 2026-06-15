@@ -1,7 +1,7 @@
 /**************************************************************************/
 /*                                                                        */
 /*  @file jx_api.h                                                        */
-/*  @brief Public API header for JsonX Library                            */
+/*  @brief Public API for the JsonX library                               */
 /*                                                                        */
 /*  This file is part of the JsonX Library.                               */
 /*                                                                        */
@@ -26,15 +26,9 @@ extern "C" {
 #include "jx_types.h"
 #include "jx_user.h"
 
-#ifdef JX_DEBUG
-#include "jx_debug.h"
-#else
-#define IF_JX_ERROR_EXIT(object) if ((object) == NULL) { goto end; }
-#endif
-
 /**************************************************************************/
 /*                                                                        */
-/*  API Function Prototypes                                               */
+/*  Public API                                                            */
 /*                                                                        */
 /**************************************************************************/
 
@@ -42,19 +36,24 @@ extern "C" {
 /**
  * @brief Initialize the JsonX library memory allocator.
  *
- * This function must be called before using any JsonX API that relies on
- * internal memory allocation (e.g., structure-to-JSON or JSON-to-structure).
+ * This function must be called before using conversion APIs that rely on
+ * temporary parser/backend allocation.
  *
  * Behavior depends on the system integration mode:
  *
  * - **ThreadX integration**: the function takes a pointer to a `TX_BYTE_POOL`
  *   which is used for all dynamic allocations within the library.
  *
- * - **Baremetal mode**: the function expects a pointer to a user-provided
- *   memory buffer and its size. This buffer will be used as a static memory pool.
+ * - **Bare-metal static mode**: the function expects a pointer to a
+ *   user-provided memory buffer and its size. This buffer is used as a
+ *   static memory pool.
+ *
+ * - **Custom allocator mode**: the function expects user-provided allocation
+ *   hooks.
  *
  * @note This function must be called once during system startup.
- *       Calling it multiple times without calling @ref jx_deinit is not supported.
+ *       Calling it multiple times without calling @ref jx_parser_deinit is
+ *       not supported.
  *
  * @param[in] byte_pool Pointer to ThreadX byte pool (if @ref JX_USE_THREADX is defined).
  * @param[in] buffer    Pointer to the static buffer (baremetal only).
@@ -84,8 +83,9 @@ JX_STATUS jx_init(JX_HOOKS *hooks);
 /**
  * @brief Deinitialize the JsonX parser and release internal memory.
  *
- * This function releases all resources associated with the internal memory pool.
- * It should be called during system shutdown or before reinitialization.
+ * This function releases all resources associated with the internal parser
+ * instance. It should be called during system shutdown or before
+ * reinitialization.
  *
  * On RTOS-based systems, this function will release memory back to the
  * RTOS allocator (e.g., ThreadX byte pool). On baremetal systems, it resets
@@ -97,7 +97,7 @@ void jx_parser_deinit(void);
 
 #if !defined(JX_USE_BAREMETAL) || defined(JX_USE_HEAP_BAREMETAL)
 /**
- * @brief Allocate memory from the internal memory pool used by JsonX.
+ * @brief Allocate memory from the allocator configured for JsonX.
  *
  * This function provides dynamic memory allocation compatible with the
  * selected system configuration:
@@ -105,8 +105,8 @@ void jx_parser_deinit(void);
  * - **RTOS systems**: memory is allocated from the configured RTOS allocator (e.g., ThreadX pool).
  * - **Baremetal systems**: memory is carved from a statically provided buffer.
  *
- * This function is used internally by JsonX, but can also be used by the user
- * for allocating temporary buffers for operations like serialization or parsing.
+ * This function is used internally by JsonX and may also be used by callers
+ * that need temporary buffers with the same ownership model.
  *
  * @param memory_size  Number of bytes to allocate.
  *
@@ -132,10 +132,10 @@ void jx_free_memory(void *memory_ptr);
 #endif
 
 /**
- * @brief Convert a structure represented by JX_ELEMENTs into a JSON string.
+ * @brief Serialize a JsonX element tree into a JSON string.
  *
- * This function transforms a flat structure array into a JSON string and writes
- * the result into the user-provided buffer.
+ * This function walks a caller-provided `JX_ELEMENT` tree and writes the JSON
+ * representation into the user-provided output buffer.
  *
  * The output buffer must be allocated by the user and passed as @p buffer.
  * If the JsonX library is used with RTOS integration (e.g., ThreadX), it is
@@ -144,14 +144,14 @@ void jx_free_memory(void *memory_ptr);
  *
  * On baremetal systems, static memory is used internally, and no dynamic allocation occurs.
  *
- * When RTOS is enabled, all temporary memory (e.g., for intermediate cJSON objects)
+ * When RTOS is enabled, all temporary backend memory
  * that is allocated from the internal memory pool is automatically freed at the
  * end of the operation.
  *
  * @note This is a high-level API function. Internal helpers are not exposed to
  *       avoid misuse or unsafe memory handling.
  *
- * @param element        Pointer to an array of JX_ELEMENTs describing the structure.
+ * @param element        Pointer to the root `JX_ELEMENT` array.
  * @param element_size   Number of elements in the @p element array.
  * @param buffer         Destination buffer to write the resulting JSON string.
  * @param buffer_size    Size of the destination buffer in bytes.
@@ -159,22 +159,23 @@ void jx_free_memory(void *memory_ptr);
  *
  * @retval JX_SUCCESS    The conversion was successful.
  * @retval JX_ERROR      Failed to serialize the structure or buffer is too small.
- */JX_STATUS jx_struct_to_json(JX_ELEMENT *element,
+ */
+JX_STATUS jx_struct_to_json(JX_ELEMENT *element,
                             size_t element_size,
                             char *buffer,
                             size_t buffer_size,
                             JX_FORMAT format);
 
 /**
- * @brief Parse a JSON string into a flat structure represented by JX_ELEMENTs.
+ * @brief Parse a JSON string into storage described by a JsonX element tree.
  *
- * This function parses the given JSON string and populates the user-defined
- * structure described by the JX_ELEMENT array.
+ * This function parses the given JSON string and writes values into the
+ * caller-owned storage referenced by the `JX_ELEMENT` tree.
  *
  * Memory management is handled internally. On baremetal systems, the internal
  * memory buffer is reset before each call.
  *
- * When RTOS is enabled, all temporary memory (e.g., for intermediate cJSON objects)
+ * When RTOS is enabled, all temporary backend memory
  * that is allocated from the internal memory pool is automatically freed at the
  * end of the operation.
  *
@@ -194,6 +195,19 @@ JX_STATUS jx_json_to_struct(char *buffer,
                             size_t element_size,
                             JX_PARSE_MODE mode);
 
+/**
+ * @brief Return the offset of the last parser error relative to an input buffer.
+ *
+ * This helper is intended for diagnostics after @ref jx_json_to_struct returns
+ * @ref JX_ERROR. The returned value is the byte offset from @p buffer to the
+ * backend error pointer. If no parser error pointer is available, or @p buffer
+ * is NULL, the function returns `(size_t)-1`.
+ *
+ * @param[in] buffer Input JSON buffer used in the failed parse operation.
+ *
+ * @return Byte offset of the last parser error, or `(size_t)-1` when unknown.
+ */
+size_t jx_get_last_error_offset(const char *buffer);
 
 #ifdef __cplusplus
 }

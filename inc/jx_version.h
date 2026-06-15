@@ -22,9 +22,10 @@ extern "C" {
 /*                                                                        */
 /**************************************************************************/
 
-#define JX_VERSION_MAJOR     1
+#define JX_VERSION_MAJOR     2
 #define JX_VERSION_MINOR     0
 #define JX_VERSION_PATCH     0
+#define JX_VERSION_PRERELEASE "preview.1"
 
 #define _JX_STRINGIFY(x)     #x
 #define JX_STRINGIFY(x)      _JX_STRINGIFY(x)
@@ -32,8 +33,11 @@ extern "C" {
 #define JX_VERSION_STRING_RAW \
     "JsonX v" JX_STRINGIFY(JX_VERSION_MAJOR) "." JX_STRINGIFY(JX_VERSION_MINOR) "." JX_STRINGIFY(JX_VERSION_PATCH)
 
+#define JX_VERSION_STRING_PREVIEW \
+    JX_VERSION_STRING_RAW "-" JX_VERSION_PRERELEASE
+
 #define JX_VERSION_STRING_FULL \
-    JX_VERSION_STRING_RAW " - (C) Mihail Zamurca, MIT Licensed"
+    JX_VERSION_STRING_PREVIEW " - preview release"
 /**************************************************************************/
 /*                                                                        */
 /*  API Functions                                                         */
