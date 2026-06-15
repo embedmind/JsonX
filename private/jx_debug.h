@@ -24,6 +24,7 @@ extern "C" {
 /**************************************************************************/
 
 #include "jx_types.h"
+#include "jx_backend.h"
 #include <stdio.h>
 #include <stdarg.h>
 
@@ -42,7 +43,7 @@ extern "C" {
 #define IF_JX_ERROR_EXIT(object)                              \
     if ((object) == NULL)                                     \
     {                                                         \
-        const char *error_ptr = cJSON_GetErrorPtr();          \
+        const char *error_ptr = jx_backend_get_error_ptr();   \
         if (error_ptr != NULL)                                \
         {                                                     \
             jx_log("Error before: %s\n", error_ptr);          \
@@ -79,11 +80,29 @@ static inline void jx_dump_structure(const JX_ELEMENT *elements, size_t count)
         switch (elements[i].type)
         {
             case JX_STRING:
-                jx_log("\"%s\"\n", (const char *)elements[i].value_p);
+                jx_log("\"%s\" [cap %lu]\n",
+                       (const char *)elements[i].value_p,
+                       (unsigned long)elements[i].value_capacity);
                 break;
 
             case JX_NUMBER:
                 jx_log("%ld\n", *(const long *)elements[i].value_p);
+                break;
+
+            case JX_U32:
+                jx_log("%lu\n", (unsigned long)*(const uint32_t *)elements[i].value_p);
+                break;
+
+            case JX_I32:
+                jx_log("%ld\n", (long)*(const int32_t *)elements[i].value_p);
+                break;
+
+            case JX_U64:
+                jx_log("%llu\n", (unsigned long long)*(const uint64_t *)elements[i].value_p);
+                break;
+
+            case JX_I64:
+                jx_log("%lld\n", (long long)*(const int64_t *)elements[i].value_p);
                 break;
 
             case JX_BOOLEAN:
@@ -91,6 +110,11 @@ static inline void jx_dump_structure(const JX_ELEMENT *elements, size_t count)
                 break;
 
             case JX_ARRAY:
+                jx_log("[array %lu/%lu elements]\n",
+                       (unsigned long)elements[i].value_len,
+                       (unsigned long)elements[i].value_capacity);
+                break;
+
             case JX_OBJECT:
                 jx_log("[nested %lu elements]\n", (unsigned long)elements[i].value_len);
                 break;

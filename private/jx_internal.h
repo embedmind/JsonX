@@ -24,7 +24,16 @@ extern "C" {
 /**************************************************************************/
 
 #include "jx_types.h"
+#if defined(JX_USE_BAREMETAL) && !defined(JX_USE_HEAP_BAREMETAL)
+#include "jx_static_allocator.h"
+#endif
 #include <string.h>
+
+#ifdef JX_DEBUG
+#include "jx_debug.h"
+#else
+#define IF_JX_ERROR_EXIT(object) if ((object) == NULL) { goto end; }
+#endif
 
 /**************************************************************************/
 /*                                                                        */
@@ -32,11 +41,11 @@ extern "C" {
 /*                                                                        */
 /**************************************************************************/
 
-/* Return false if pointer is NULL */
+/* Return JX_ERROR if pointer is NULL. */
 #define JX_RETURN_IF_NULL(p)        \
     if ((p) == NULL)                \
     {                               \
-        return false;               \
+        return JX_ERROR;            \
     }
 
 /**************************************************************************/
@@ -44,6 +53,21 @@ extern "C" {
 /*  Inline Helpers                                                        */
 /*                                                                        */
 /**************************************************************************/
+
+/* JSON parser instance */
+typedef struct
+{
+    JX_STATE   state;
+    JX_STATUS  status;
+    JX_HOOKS   hooks;
+
+#ifdef JX_USE_THREADX
+    TX_BYTE_POOL *byte_pool;
+#endif
+#if defined(JX_USE_BAREMETAL) && !defined(JX_USE_HEAP_BAREMETAL)
+    jx_static_allocator_t* allocator;
+#endif
+} JX_PARSER;
 
 /**
  * @brief Check if the element has a non-empty property name.
@@ -112,6 +136,54 @@ static inline void jx_set_number(JX_ELEMENT *e, double value)
 }
 
 /**
+ * @brief Set an unsigned 32-bit integer value in the element and mark as updated.
+ *
+ * @param e     Pointer to JX_ELEMENT.
+ * @param value Unsigned 32-bit integer value to set.
+ */
+static inline void jx_set_u32(JX_ELEMENT *e, uint32_t value)
+{
+    *((uint32_t *)(uintptr_t)(e->value_p)) = value;
+    jx_set_updated(e);
+}
+
+/**
+ * @brief Set a signed 32-bit integer value in the element and mark as updated.
+ *
+ * @param e     Pointer to JX_ELEMENT.
+ * @param value Signed 32-bit integer value to set.
+ */
+static inline void jx_set_i32(JX_ELEMENT *e, int32_t value)
+{
+    *((int32_t *)(uintptr_t)(e->value_p)) = value;
+    jx_set_updated(e);
+}
+
+/**
+ * @brief Set an unsigned 64-bit integer value in the element and mark as updated.
+ *
+ * @param e     Pointer to JX_ELEMENT.
+ * @param value Unsigned 64-bit integer value to set.
+ */
+static inline void jx_set_u64(JX_ELEMENT *e, uint64_t value)
+{
+    *((uint64_t *)(uintptr_t)(e->value_p)) = value;
+    jx_set_updated(e);
+}
+
+/**
+ * @brief Set a signed 64-bit integer value in the element and mark as updated.
+ *
+ * @param e     Pointer to JX_ELEMENT.
+ * @param value Signed 64-bit integer value to set.
+ */
+static inline void jx_set_i64(JX_ELEMENT *e, int64_t value)
+{
+    *((int64_t *)(uintptr_t)(e->value_p)) = value;
+    jx_set_updated(e);
+}
+
+/**
  * @brief Set a string value in the element and mark as updated.
  *
  * @param e     Pointer to JX_ELEMENT.
@@ -119,18 +191,11 @@ static inline void jx_set_number(JX_ELEMENT *e, double value)
  */
 static inline void jx_set_string(JX_ELEMENT *e, const char *value)
 {
-    strncpy((char *)(uintptr_t)(e->value_p), value, JX_PROPERTY_MAX_SIZE);
-    jx_set_updated(e);
-}
+    size_t capacity = (e->value_capacity != 0U) ? e->value_capacity : JX_PROPERTY_MAX_SIZE;
+    char *destination = (char *)(uintptr_t)(e->value_p);
 
-/**
- * @brief Set a uint32_t value to zero and mark as updated.
- *
- * @param e Pointer to JX_ELEMENT.
- */
-static inline void jx_set_null_u32(JX_ELEMENT *e)
-{
-    *((uint32_t *)(uintptr_t)(e->value_p)) = 0;
+    strncpy(destination, value, capacity);
+    destination[capacity - 1U] = '\0';
     jx_set_updated(e);
 }
 

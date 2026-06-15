@@ -1,16 +1,44 @@
 /**************************************************************************/
 /*                                                                        */
 /*  @file example.c                                                       */
-/*  @brief Demonstration of JsonX with Nested Object Layouts              */
+/*  @brief JsonX schema declaration example                               */
 /*                                                                        */
-/*  Shows how to declare complex nested object layouts using              */
-/*  JX_ELEMENT macros and serialize/parse JSON structures.                */
+/*  Shows how to declare readable JSON-shaped mappings using              */
+/*  JX_ELEMENT helper macros and serialize/parse caller-owned storage.    */
 /*                                                                        */
 /*  @author Mihail Zamurca                                                */
 /*                                                                        */
 /**************************************************************************/
 
 #include "jx_api.h"
+
+#include <stdbool.h>
+#include <stdint.h>
+#include <stdio.h>
+#include <string.h>
+
+/*
+ * Configuration model:
+ *
+ * JsonX includes inc/jx_config.h through public headers. Projects may provide
+ * jx_user_config.h earlier on the include path to select integration mode and
+ * optional parser features without editing library sources.
+ *
+ * Minimal ThreadX project override:
+ *
+ *   #define JX_DEBUG
+ *   #define JX_USE_RTOS
+ *   #define JX_USE_THREADX
+ *   #define JX_ENABLE_JSON_COMMENTS 0
+ *   #define JX_MAX_NESTING_LEVEL 3
+ *   #define JX_PROPERTY_MAX_SIZE 50
+ *
+ * If no override is provided, JsonX defaults to static bare-metal mode.
+ */
+
+#ifdef JX_USE_CUSTOM_ALLOCATOR
+#include <stdlib.h>
+#endif
 
 #define JX_MEM_POOL_SIZE     1024
 #define JX_USER_BUFFER_SIZE  256
@@ -22,7 +50,7 @@ static TX_BYTE_POOL jx_byte_pool;
 bool test(void)
 {
     JX_STATUS state;
-    jx_log("%s\r\n", jx_get_version_string());
+    test_printf("%s\r\n", jx_get_version_string());
 #ifdef JX_USE_CUSTOM_ALLOCATOR
     // Initialize JsonX with custom memory hooks
     JX_HOOKS hooks = { .malloc_fn = malloc, .free_fn = free };
@@ -74,27 +102,26 @@ bool test(void)
     #endif
 #endif
 
-    // Define test structure with name and coordinate array
     struct
     {
         char name[32];
-        double coords[2];
-    } test_struct;
+        uint32_t position[2];
+    } demo_user;
 
-    // Bind JSON fields to structure fields
-    JX_ELEMENT user_object[] = {
-        { .type = JX_STRING, .property = "name", .value_p = test_struct.name },
-        { .type = JX_ARRAY,  .property = "position", .element = (JX_ELEMENT[]) {
-            JX_NUMBER_VAL(test_struct.coords[0]),
-            JX_NUMBER_VAL(test_struct.coords[1])
-        }, .value_len = 2 }
+    JX_PROPERTY_U32_ARRAY_2(position_array, demo_user.position);
+
+    JX_ELEMENT user_object[] =
+    {
+        JX_PROPERTY_STRING_BUFFER("name", demo_user.name),
+        JX_PROPERTY_ARRAY("position", position_array)
     };
+
     size_t user_object_size = sizeof(user_object) / sizeof(user_object[0]);
 
-    // Initialize test data
-    strncpy(test_struct.name, "Adam", sizeof(test_struct.name));
-    test_struct.coords[0] = 12;
-    test_struct.coords[1] = 34;
+    strncpy(demo_user.name, "Adam", sizeof(demo_user.name));
+    demo_user.name[sizeof(demo_user.name) - 1U] = '\0';
+    demo_user.position[0] = 12;
+    demo_user.position[1] = 34;
 
     // Allocate buffer using JsonX allocation API
 #if !defined(JX_USE_BAREMETAL) || defined(JX_USE_HEAP_BAREMETAL)
@@ -109,7 +136,6 @@ bool test(void)
 #endif
 
 
-    // Convert structure to formatted JSON
     state = jx_struct_to_json(user_object, user_object_size, user_buffer, JX_USER_BUFFER_SIZE, JX_FORMATTED);
     if (state != JX_SUCCESS)
     {
@@ -121,20 +147,21 @@ bool test(void)
     }
     test_printf("Formatted JSON: %s\r\n", user_buffer);
 
-    // Convert structure to minified JSON
     state = jx_struct_to_json(user_object, user_object_size, user_buffer, JX_USER_BUFFER_SIZE, JX_MINIFIED);
     if (state != JX_SUCCESS)
     {
+#if !defined(JX_USE_BAREMETAL) || defined(JX_USE_HEAP_BAREMETAL)
         jx_free_memory(user_buffer);
+#endif
         jx_parser_deinit();
         return false;
     }
     test_printf("Minified JSON: %s\r\n", user_buffer);
 
-    // Free buffer after conversion
+#if !defined(JX_USE_BAREMETAL) || defined(JX_USE_HEAP_BAREMETAL)
     jx_free_memory(user_buffer);
+#endif
 
-    // Parse JSON into structure
     const char *input = "{\"name\":\"Eve\",\"position\":[56,78]}";
     state = jx_json_to_struct((char*)input, user_object, user_object_size, JX_MODE_STRICT);
     if (state != JX_SUCCESS)
@@ -142,13 +169,10 @@ bool test(void)
         jx_parser_deinit();
         return false;
     }
-    jx_dump_structure(user_object, user_object_size);
-    // Output parsed structure contents
-    test_printf("test_struct.name = %s\r\n", test_struct.name);
-    test_printf("test_struct.coords[0] = %d\r\n", (int)test_struct.coords[0]);
-    test_printf("test_struct.coords[1] = %d\r\n", (int)test_struct.coords[1]);
+    test_printf("demo_user.name = %s\r\n", demo_user.name);
+    test_printf("demo_user.position[0] = %d\r\n", (int)demo_user.position[0]);
+    test_printf("demo_user.position[1] = %d\r\n", (int)demo_user.position[1]);
 
-    // Deinitialize JsonX (cleans up global state)
     jx_parser_deinit();
     return true;
 }

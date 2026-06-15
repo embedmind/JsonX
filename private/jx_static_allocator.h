@@ -18,6 +18,7 @@
 #include <stdint.h>
 #include <stdbool.h>
 #include <string.h>
+
 #include "jx_config.h"
 
 #ifdef __cplusplus

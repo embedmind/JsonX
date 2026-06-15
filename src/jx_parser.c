@@ -11,7 +11,12 @@
 /**************************************************************************/
 
 #include "jx_api.h"
-#include "jx_internal.h"
+#include "../private/jx_backend.h"
+#include "../private/jx_internal.h"
+#include <limits.h>
+#if defined(JX_USE_BAREMETAL) && defined(JX_USE_HEAP_BAREMETAL)
+#include <stdlib.h>
+#endif
 #ifdef JX_USE_FREERTOS
 #include "FreeRTOS.h"
 #endif
@@ -28,10 +33,7 @@
 
 static JX_PARSER *JSON_Parser = NULL;
 
-static cJSON *_jx_json_to_object(char *buffer);
-static char *_jx_object_to_json(cJSON *object, char *buffer, const int buffer_size, JX_FORMAT format);
-static JX_STATUS _jx_object_to_struct(cJSON *main_object, JX_ELEMENT *element, size_t size, JX_PARSE_MODE mode);
-static JX_STATUS _jx_struct_to_object(cJSON *object, JX_ELEMENT *element, size_t size);
+static bool _jx_is_initialized(void);
 
 
 /**************************************************************************/
@@ -44,23 +46,28 @@ static JX_STATUS _jx_struct_to_object(cJSON *object, JX_ELEMENT *element, size_t
 #ifdef JX_USE_THREADX
 JX_STATUS jx_init(TX_BYTE_POOL *byte_pool)
 {
+    UINT tx_status;
+    JX_PARSER *parser = NULL;
+
     if ((!byte_pool) || JSON_Parser)
     {
         return JX_ERROR;
     }
 
-    /* Allocate memory for parser instance */
-    tx_byte_allocate(byte_pool, (VOID**)&JSON_Parser, ALIGN_4(sizeof(JX_PARSER)), TX_NO_WAIT);
-	if (!JSON_Parser)
-		return JX_ERROR;
+    tx_status = tx_byte_allocate(byte_pool, (VOID **)&parser,
+                                 ALIGN_4(sizeof(JX_PARSER)), TX_NO_WAIT);
+    if ((tx_status != TX_SUCCESS) || (parser == NULL))
+    {
+        return JX_ERROR;
+    }
 
-	memset(JSON_Parser, 0, sizeof(JX_PARSER));
+    JSON_Parser = parser;
+    memset(JSON_Parser, 0, sizeof(JX_PARSER));
     JSON_Parser->byte_pool         = byte_pool;
     JSON_Parser->hooks.malloc_fn   = jx_alloc_memory;
     JSON_Parser->hooks.free_fn     = jx_free_memory;
 
-    cJSON_Hooks cJSON_hooks = { JSON_Parser->hooks.malloc_fn, JSON_Parser->hooks.free_fn };
-    cJSON_InitHooks(&cJSON_hooks);
+    jx_backend_init_hooks(JSON_Parser->hooks.malloc_fn, JSON_Parser->hooks.free_fn);
 
     JSON_Parser->state = JX_INITIALIZED;
 #ifdef JX_DEBUG
@@ -86,8 +93,7 @@ JX_STATUS jx_init(void)
 	memset(JSON_Parser, 0, sizeof(JX_PARSER));
 	JSON_Parser->hooks.malloc_fn   = jx_alloc_memory;
 	JSON_Parser->hooks.free_fn     = jx_free_memory;
-	cJSON_Hooks cJSON_hooks = { JSON_Parser->hooks.malloc_fn, JSON_Parser->hooks.free_fn };
-	cJSON_InitHooks(&cJSON_hooks);
+	jx_backend_init_hooks(JSON_Parser->hooks.malloc_fn, JSON_Parser->hooks.free_fn);
 
 	JSON_Parser->state = JX_INITIALIZED;
 #ifdef JX_DEBUG
@@ -101,26 +107,30 @@ JX_STATUS jx_init(void)
 #ifndef JX_USE_HEAP_BAREMETAL
 JX_STATUS jx_init(void *buffer, size_t size)
 {
-	 if (!buffer || size <  ALIGN_4(sizeof(JX_PARSER)))
-	 {
-	        return JX_ERROR;
-	 }
-	JSON_Parser = (JX_PARSER*)buffer;
-	buffer += ALIGN_4(sizeof(JX_PARSER));
-	size -= ALIGN_4(sizeof(JX_PARSER));
-	memset(JSON_Parser, 0, sizeof(JX_PARSER));
-#ifndef JX_USE_HEAP_BAREMETAL
-	JSON_Parser->allocator = jx_static_allocator_init(buffer, size);
-	if(!JSON_Parser->allocator)
+	uint8_t *pool_cursor;
+	size_t parser_size = ALIGN_4(sizeof(JX_PARSER));
+
+	if(!buffer || JSON_Parser || size < parser_size)
 	{
 		return JX_ERROR;
 	}
-#endif
+
+	pool_cursor = (uint8_t *)buffer;
+	JSON_Parser = (JX_PARSER *)pool_cursor;
+	pool_cursor += parser_size;
+	size -= parser_size;
+	memset(JSON_Parser, 0, sizeof(JX_PARSER));
+	JSON_Parser->allocator = jx_static_allocator_init(pool_cursor, size);
+	if(!JSON_Parser->allocator)
+	{
+		memset(JSON_Parser, 0, sizeof(JX_PARSER));
+		JSON_Parser = NULL;
+		return JX_ERROR;
+	}
 	JSON_Parser->hooks.malloc_fn   = jx_static_malloc;
 	JSON_Parser->hooks.free_fn     = jx_static_free;
 	JSON_Parser->hooks.reset_fn    = jx_static_reset;
-	cJSON_Hooks cJSON_hooks = { JSON_Parser->hooks.malloc_fn, JSON_Parser->hooks.free_fn };
-	cJSON_InitHooks(&cJSON_hooks);
+	jx_backend_init_hooks(JSON_Parser->hooks.malloc_fn, JSON_Parser->hooks.free_fn);
 
 	JSON_Parser->state = JX_INITIALIZED;
 #ifdef JX_DEBUG
@@ -146,8 +156,7 @@ JX_STATUS jx_init(JX_HOOKS *hooks)
 	memset(JSON_Parser, 0, sizeof(JX_PARSER));
 	JSON_Parser->hooks.malloc_fn   = hooks->malloc_fn;
 	JSON_Parser->hooks.free_fn     = hooks->free_fn;
-	cJSON_Hooks cJSON_hooks = { JSON_Parser->hooks.malloc_fn, JSON_Parser->hooks.free_fn };
-	cJSON_InitHooks(&cJSON_hooks);
+	jx_backend_init_hooks(JSON_Parser->hooks.malloc_fn, JSON_Parser->hooks.free_fn);
 
 	JSON_Parser->state = JX_INITIALIZED;
 #ifdef JX_DEBUG
@@ -159,20 +168,36 @@ JX_STATUS jx_init(JX_HOOKS *hooks)
 
 void jx_parser_deinit(void)
 {
+    JX_PARSER *parser = JSON_Parser;
+
     if (!JSON_Parser)
     {
         return;
     }
 
-    cJSON_Hooks cJSON_hooks = { NULL, NULL };
-    cJSON_InitHooks(&cJSON_hooks);
-    memset(JSON_Parser, 0, sizeof(JX_PARSER));
-#if defined(JX_USE_BAREMETAL) && !defined(JX_USE_HEAP_BAREMETAL)
-    // do not call jx_free_memory
-#else
-    jx_free_memory((void*)JSON_Parser);
-#endif
+    jx_backend_reset_hooks();
     JSON_Parser = NULL;
+#if defined(JX_USE_BAREMETAL) && !defined(JX_USE_HEAP_BAREMETAL)
+    memset(parser, 0, sizeof(JX_PARSER));
+#elif defined(JX_USE_CUSTOM_ALLOCATOR)
+    void (*free_fn)(void *) = parser->hooks.free_fn;
+    memset(parser, 0, sizeof(JX_PARSER));
+    if (free_fn)
+    {
+        free_fn((void *)parser);
+    }
+#elif defined(JX_USE_THREADX)
+    memset(parser, 0, sizeof(JX_PARSER));
+    tx_byte_release((void *)parser);
+#elif defined(JX_USE_FREERTOS)
+    memset(parser, 0, sizeof(JX_PARSER));
+    vPortFree((void *)parser);
+#elif defined(JX_USE_HEAP_BAREMETAL)
+    memset(parser, 0, sizeof(JX_PARSER));
+    free((void *)parser);
+#else
+    memset(parser, 0, sizeof(JX_PARSER));
+#endif
 
 #ifdef JX_DEBUG
     jx_log("JX Parser deinitialized\r\n");
@@ -190,8 +215,21 @@ void *jx_alloc_memory(size_t memory_size)
 {
     void *memory_ptr = NULL;
 
+    if (memory_size == 0U)
+    {
+        return NULL;
+    }
+
 #ifdef JX_USE_THREADX
-    tx_byte_allocate(JSON_Parser->byte_pool, &memory_ptr, ALIGN_4(memory_size), TX_NO_WAIT);
+    if ((JSON_Parser == NULL) || (JSON_Parser->byte_pool == NULL))
+    {
+        return NULL;
+    }
+    if (tx_byte_allocate(JSON_Parser->byte_pool, &memory_ptr,
+                         ALIGN_4(memory_size), TX_NO_WAIT) != TX_SUCCESS)
+    {
+        return NULL;
+    }
 #endif
 #ifdef JX_USE_FREERTOS
     memory_ptr = pvPortMalloc(ALIGN_4(memory_size));
@@ -200,6 +238,10 @@ void *jx_alloc_memory(size_t memory_size)
 #ifdef JX_USE_HEAP_BAREMETAL
     memory_ptr = malloc(ALIGN_4(memory_size));
 #else
+    if (JSON_Parser == NULL)
+    {
+        return NULL;
+    }
     memory_ptr = jx_static_malloc(ALIGN_4(memory_size));
 #endif
 #endif
@@ -213,6 +255,11 @@ void *jx_alloc_memory(size_t memory_size)
 
 void jx_free_memory(void *memory_ptr)
 {
+    if (memory_ptr == NULL)
+    {
+        return;
+    }
+
 #ifdef JX_USE_THREADX
     tx_byte_release(memory_ptr);
 #endif
@@ -241,235 +288,51 @@ void jx_free_memory(void *memory_ptr)
 
 JX_STATUS jx_struct_to_json(JX_ELEMENT *element, size_t element_size, char *buffer, size_t buffer_size, JX_FORMAT format)
 {
+    if ((!_jx_is_initialized()) || (!element) || (element_size == 0U) ||
+        (!buffer) || (buffer_size == 0U) || (buffer_size > (size_t)INT_MAX) ||
+        ((format != JX_MINIFIED) && (format != JX_FORMATTED)))
+    {
+        return JX_ERROR;
+    }
+
 #if defined(JX_USE_BAREMETAL) && !defined(JX_USE_HEAP_BAREMETAL)
 	jx_static_reset();
 #endif
-    cJSON *object = cJSON_CreateObject();
-    if (!object)
-        return JX_ERROR;
-
-    if (_jx_struct_to_object(object, element, element_size) != JX_SUCCESS)
+    if (!jx_backend_write_elements(element, element_size, buffer, buffer_size, format))
     {
-#if !defined(JX_USE_BAREMETAL) || defined(JX_USE_HEAP_BAREMETAL)
-        cJSON_Delete(object);
-#endif
         return JX_ERROR;
     }
 
-    if (!_jx_object_to_json(object, buffer, buffer_size, format))
-    {
-#if !defined(JX_USE_BAREMETAL) || defined(JX_USE_HEAP_BAREMETAL)
-        cJSON_Delete(object);
-#endif
-        return JX_ERROR;
-    }
-#if !defined(JX_USE_BAREMETAL) || defined(JX_USE_HEAP_BAREMETAL)
-    cJSON_Delete(object);
-#endif
     return JX_SUCCESS;
 }
 
 JX_STATUS jx_json_to_struct(char *buffer, JX_ELEMENT *element, size_t element_size, JX_PARSE_MODE mode)
 {
+    if ((!_jx_is_initialized()) || (!buffer) || (!element) || (element_size == 0U) ||
+        ((mode != JX_MODE_RELAXED) && (mode != JX_MODE_STRICT)))
+    {
+        return JX_ERROR;
+    }
+
 #if defined(JX_USE_BAREMETAL) && !defined(JX_USE_HEAP_BAREMETAL)
 	jx_static_reset();
 #endif
-    cJSON *object = _jx_json_to_object(buffer);
-    if (!object)
-        return JX_ERROR;
-
-    JX_STATUS result = _jx_object_to_struct(object, element, element_size, mode);
-#if !defined(JX_USE_BAREMETAL) || defined(JX_USE_HEAP_BAREMETAL)
-    cJSON_Delete(object);
-#endif
-    return result;
+    return jx_backend_parse_into_elements(buffer, element, element_size, mode);
 }
 
-/**************************************************************************/
-/*                                                                        */
-/*  Internal Conversion: Struct <-> cJSON Object                                   */
-/*                                                                        */
-/**************************************************************************/
-
-static JX_STATUS _jx_struct_to_object(cJSON *object, JX_ELEMENT *element, size_t size)
+size_t jx_get_last_error_offset(const char *buffer)
 {
-    cJSON *node = NULL;
-    size_t i;
+    const char *error_ptr = jx_backend_get_error_ptr();
 
-    if (!object || size == 0)
+    if ((buffer == NULL) || (error_ptr == NULL) || (error_ptr < buffer))
     {
-        return JX_ERROR;
+        return (size_t)-1;
     }
 
-    for (i = 0; i < size; ++i)
-    {
-        const char *prop = element[i].property;
-
-        switch (element[i].type)
-        {
-        case JX_STRING:
-            node = cJSON_CreateString((const char *)element[i].value_p);
-            break;
-
-        case JX_BOOLEAN:
-            node = cJSON_CreateBool(*((bool *)element[i].value_p));
-            break;
-
-        case JX_NUMBER:
-            node = cJSON_CreateNumber(*((double *)element[i].value_p));
-            break;
-
-        case JX_OBJECT:
-            node = cJSON_CreateObject();
-            if (_jx_struct_to_object(node, element[i].element, element[i].value_len) != JX_SUCCESS)
-                return JX_ERROR;
-            break;
-
-        case JX_ARRAY:
-            node = cJSON_CreateArray();
-            if (_jx_struct_to_object(node, element[i].element, element[i].value_len) != JX_SUCCESS)
-                return JX_ERROR;
-            break;
-
-        default:
-            break;
-        }
-
-        if (node)
-        {
-            bool added = (object->type == cJSON_Array)
-                         ? cJSON_AddItemToArray(object, node)
-                         : cJSON_AddItemToObject(object, prop, node);
-
-            if (!added)
-            {
-#if !defined(JX_USE_BAREMETAL) || defined(JX_USE_HEAP_BAREMETAL)
-                cJSON_Delete(node);
-#endif
-            }
-        }
-    }
-
-    return JX_SUCCESS;
+    return (size_t)(error_ptr - buffer);
 }
 
-
-static JX_STATUS _jx_object_to_struct(cJSON *main_object, JX_ELEMENT *element, size_t size, JX_PARSE_MODE mode)
+static bool _jx_is_initialized(void)
 {
-    IF_JX_ERROR_EXIT(main_object);
-
-    for (size_t i = 0; i < size; ++i)
-    {
-        cJSON *object = NULL;
-
-        JX_RETURN_IF_NULL(&element[i]);
-        JX_RETURN_IF_NULL(element[i].property);
-
-        if (element[i].property[0] != 0)
-        {
-            object = cJSON_GetObjectItemCaseSensitive(main_object, element[i].property);
-        }
-        else
-        {
-            object = main_object;
-        }
-
-        if (!object)
-        {
-            if (mode == JX_MODE_STRICT)
-                goto end;
-            else
-                continue;
-        }
-
-        switch (element[i].type)
-        {
-        case JX_NULL:
-            if (cJSON_IsNull(object))
-                jx_set_null_u32(&element[i]);
-            else
-                jx_clear_status(&element[i]);
-            break;
-
-        case JX_BOOLEAN:
-            if (cJSON_IsBool(object))
-                jx_set_bool(&element[i], cJSON_IsTrue(object));
-            else
-                jx_clear_status(&element[i]);
-            break;
-
-        case JX_NUMBER:
-            if (cJSON_IsNumber(object))
-                jx_set_number(&element[i], object->valuedouble);
-            else
-                jx_clear_status(&element[i]);
-            break;
-
-        case JX_STRING:
-            if (cJSON_IsString(object) && object->valuestring)
-                jx_set_string(&element[i], object->valuestring);
-            else
-                jx_clear_status(&element[i]);
-            break;
-
-        case JX_OBJECT:
-            if (cJSON_IsObject(object))
-            {
-                if (_jx_object_to_struct(object, element[i].element, element[i].value_len, mode) != JX_SUCCESS)
-                    goto end;
-                jx_set_updated(&element[i]);
-            }
-            else
-            {
-                jx_clear_status(&element[i]);
-            }
-            break;
-
-        case JX_ARRAY:
-            element[i].value_len = cJSON_GetArraySize(object);
-            for (size_t j = 0; j < element[i].value_len; ++j)
-            {
-                cJSON *item = cJSON_GetArrayItem(object, j);
-                if (!item || !element[i].element)
-                    continue;
-
-                size_t len = element[i].element[j].value_len;
-                if (_jx_object_to_struct(item, &element[i].element[j], len ? len : 1, mode) != JX_SUCCESS)
-                    goto end;
-
-                jx_set_updated(&element[i].element[j]);
-            }
-            jx_set_updated(&element[i]);
-            break;
-
-        default:
-            break;
-        }
-    }
-
-    return JX_SUCCESS;
-
-end:
-    return JX_ERROR;
+    return ((JSON_Parser != NULL) && (JSON_Parser->state == JX_INITIALIZED));
 }
-
-
-/**************************************************************************/
-/*                                                                        */
-/*  Internal Conversion: JSON string <-> cJSON Object                              */
-/*                                                                        */
-/**************************************************************************/
-
-static cJSON *_jx_json_to_object(char *buffer)
-{
-    return cJSON_Parse(buffer);
-}
-
-static char *_jx_object_to_json(cJSON *object, char *buffer, const int buffer_size, JX_FORMAT format)
-{
-    if (cJSON_PrintPreallocated(object, buffer, buffer_size, (format != JX_MINIFIED)))
-        return buffer;
-    return NULL;
-}
-
-
